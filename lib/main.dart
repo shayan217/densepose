@@ -53,9 +53,7 @@ class PoseHome extends StatefulWidget {
 
 class _PoseHomeState extends State<PoseHome> with WidgetsBindingObserver {
   final TextEditingController _serverController = TextEditingController(
-    text: defaultTargetPlatform == TargetPlatform.android
-        ? 'ws://192.168.10.237:8001/ws/pose'
-        : 'ws://192.168.10.237:8001/ws/pose',
+    text: 'ws://192.168.10.148:8001/ws/pose',
   );
 
   CameraController? _cameraController;
@@ -68,6 +66,7 @@ class _PoseHomeState extends State<PoseHome> with WidgetsBindingObserver {
   bool _isCapturing = false;
   bool _showDepth = true;
   int _cameraIndex = 0;
+  int _framesSent = 0;
   int _framesReceived = 0;
   double _backendFps = 0;
 
@@ -111,9 +110,14 @@ class _PoseHomeState extends State<PoseHome> with WidgetsBindingObserver {
 
     await _cameraController?.dispose();
     final selected = widget.cameras[_cameraIndex % widget.cameras.length];
+    _log(
+      'Initializing camera index=$_cameraIndex '
+      'name=${selected.name} lens=${selected.lensDirection.name} '
+      'orientation=${selected.sensorOrientation}',
+    );
     final controller = CameraController(
       selected,
-      ResolutionPreset.medium,
+      ResolutionPreset.low,
       enableAudio: false,
       imageFormatGroup: ImageFormatGroup.jpeg,
     );
@@ -126,10 +130,15 @@ class _PoseHomeState extends State<PoseHome> with WidgetsBindingObserver {
     try {
       await controller.initialize();
       await controller.setFlashMode(FlashMode.off);
+      _log(
+        'Camera ready preview=${controller.value.previewSize} '
+        'aspect=${controller.value.aspectRatio.toStringAsFixed(3)}',
+      );
       if (mounted) {
         setState(() => _status = 'Camera ready');
       }
     } on CameraException catch (error) {
+      _log('Camera error: ${error.code} ${error.description}');
       if (mounted) {
         setState(() => _status = 'Camera error: ${error.description}');
       }
@@ -148,20 +157,26 @@ class _PoseHomeState extends State<PoseHome> with WidgetsBindingObserver {
     });
 
     try {
-      final channel = WebSocketChannel.connect(
-        Uri.parse(_serverController.text.trim()),
-      );
-      await channel.ready.timeout(const Duration(seconds: 4));
+      final serverUrl = _serverController.text.trim();
+      _log('Connecting WebSocket: $serverUrl');
+      if (serverUrl.isEmpty) {
+        throw Exception('Server URL خالی ہے۔ براہ کرم URL درج کریں');
+      }
+      final channel = WebSocketChannel.connect(Uri.parse(serverUrl));
+      await channel.ready.timeout(const Duration(seconds: 10));
+      _log('WebSocket connected');
       _channel = channel;
       _socketSubscription = channel.stream.listen(
         _handlePoseMessage,
         onError: (Object error) {
+          _log('WebSocket error: $error');
           if (mounted) {
             setState(() => _status = 'WebSocket error: $error');
           }
           _stopStreaming();
         },
         onDone: () {
+          _log('WebSocket closed by backend/device');
           if (mounted) {
             setState(() => _status = 'Backend disconnected');
           }
@@ -170,7 +185,13 @@ class _PoseHomeState extends State<PoseHome> with WidgetsBindingObserver {
       );
       _startStreaming();
       setState(() => _status = 'Streaming frames');
+    } on TimeoutException catch (error) {
+      _log('Connection timeout - Backend accessible نہیں ہے: $error');
+      setState(
+        () => _status = 'Timeout - Backend سے رابطہ نہیں ہوا۔ IP/Port چیک کریں',
+      );
     } catch (error) {
+      _log('Connection failed: $error');
       setState(() => _status = 'Connection failed: $error');
     } finally {
       if (mounted) {
@@ -181,13 +202,15 @@ class _PoseHomeState extends State<PoseHome> with WidgetsBindingObserver {
 
   void _startStreaming() {
     _captureTimer?.cancel();
+    _log('Starting camera frame streaming');
     _captureTimer = Timer.periodic(
-      const Duration(milliseconds: 160),
+      const Duration(milliseconds: 500),
       (_) => _sendFrame(),
     );
   }
 
   Future<void> _stopStreaming({bool updateUi = true}) async {
+    _log('Stopping stream');
     _captureTimer?.cancel();
     _captureTimer = null;
     await _socketSubscription?.cancel();
@@ -199,6 +222,7 @@ class _PoseHomeState extends State<PoseHome> with WidgetsBindingObserver {
       setState(() {
         _people = const [];
         _backendFps = 0;
+        _framesSent = 0;
         _status = 'Disconnected';
       });
     }
@@ -219,6 +243,7 @@ class _PoseHomeState extends State<PoseHome> with WidgetsBindingObserver {
     try {
       final file = await controller.takePicture();
       final bytes = await file.readAsBytes();
+      _framesSent += 1;
       channel.sink.add(
         jsonEncode({
           'type': 'frame',
@@ -227,7 +252,18 @@ class _PoseHomeState extends State<PoseHome> with WidgetsBindingObserver {
           'timestamp': DateTime.now().toUtc().toIso8601String(),
         }),
       );
+      if (mounted) {
+        setState(() {});
+      }
+      if (_framesSent == 1 || _framesSent % 5 == 0) {
+        _log(
+          'Sent frame #$_framesSent '
+          'bytes=${bytes.length} '
+          'rotation=${_cameraRotationDegrees(controller.description)}',
+        );
+      }
     } catch (error) {
+      _log('Frame capture/send failed: $error');
       if (mounted) {
         setState(() => _status = 'Frame capture failed: $error');
       }
@@ -247,6 +283,7 @@ class _PoseHomeState extends State<PoseHome> with WidgetsBindingObserver {
 
     final decoded = jsonDecode(message as String) as Map<String, dynamic>;
     if (decoded['type'] == 'error') {
+      _log("Backend error payload: ${decoded['message']}");
       setState(
         () => _status = decoded['message'] as String? ?? 'Backend error',
       );
@@ -266,6 +303,13 @@ class _PoseHomeState extends State<PoseHome> with WidgetsBindingObserver {
           ? 'No pose detected'
           : 'Detected ${nextPeople.length} person${nextPeople.length == 1 ? '' : 's'}';
     });
+    if (_framesReceived == 1 || _framesReceived % 5 == 0) {
+      _log(
+        'Received pose #$_framesReceived '
+        'people=${nextPeople.length} '
+        'backendFps=${_backendFps.toStringAsFixed(1)}',
+      );
+    }
   }
 
   Future<void> _switchCamera() async {
@@ -277,6 +321,7 @@ class _PoseHomeState extends State<PoseHome> with WidgetsBindingObserver {
       await _stopStreaming();
     }
     _cameraIndex = (_cameraIndex + 1) % widget.cameras.length;
+    _log('Switching camera to index=$_cameraIndex');
     await _initializeCamera();
     if (wasConnected) {
       await _toggleConnection();
@@ -327,6 +372,7 @@ class _PoseHomeState extends State<PoseHome> with WidgetsBindingObserver {
                           bottom: 12,
                           child: _StatusStrip(
                             status: _status,
+                            sent: _framesSent,
                             frames: _framesReceived,
                             fps: _backendFps,
                             people: _people.length,
@@ -342,6 +388,10 @@ class _PoseHomeState extends State<PoseHome> with WidgetsBindingObserver {
         ),
       ),
     );
+  }
+
+  void _log(String message) {
+    debugPrint('[DensePose] $message');
   }
 }
 
@@ -393,12 +443,10 @@ class _TopBar extends StatelessWidget {
           ),
           const SizedBox(width: 8),
           Tooltip(
-            message: showDepth
-                ? 'Hide depth projection'
-                : 'Show depth projection',
+            message: showDepth ? 'Hide avatar shadow' : 'Show avatar shadow',
             child: IconButton.filledTonal(
               onPressed: onToggleDepth,
-              icon: Icon(showDepth ? Icons.view_in_ar : Icons.polyline),
+              icon: Icon(showDepth ? Icons.layers : Icons.layers_outlined),
             ),
           ),
           const SizedBox(width: 8),
@@ -416,12 +464,14 @@ class _TopBar extends StatelessWidget {
 class _StatusStrip extends StatelessWidget {
   const _StatusStrip({
     required this.status,
+    required this.sent,
     required this.frames,
     required this.fps,
     required this.people,
   });
 
   final String status;
+  final int sent;
   final int frames;
   final double fps;
   final int people;
@@ -446,10 +496,12 @@ class _StatusStrip extends StatelessWidget {
               ),
             ),
             Text('people $people'),
-            const SizedBox(width: 16),
+            const SizedBox(width: 10),
+            Text('sent $sent'),
+            const SizedBox(width: 10),
             Text('fps ${fps.toStringAsFixed(1)}'),
-            const SizedBox(width: 16),
-            Text('frames $frames'),
+            const SizedBox(width: 10),
+            Text('recv $frames'),
           ],
         ),
       ),
@@ -505,69 +557,385 @@ class PoseLandmark {
 class PosePainter extends CustomPainter {
   PosePainter({required this.people, required this.showDepth});
 
-  static const connections = <(int, int)>[
-    (11, 12),
-    (11, 13),
-    (13, 15),
-    (12, 14),
-    (14, 16),
-    (11, 23),
-    (12, 24),
-    (23, 24),
-    (23, 25),
-    (25, 27),
-    (24, 26),
-    (26, 28),
-    (27, 31),
-    (28, 32),
-    (0, 11),
-    (0, 12),
-  ];
-
   final List<PosePerson> people;
   final bool showDepth;
 
   @override
   void paint(Canvas canvas, Size size) {
-    final linePaint = Paint()
-      ..color = const Color(0xff43d9ad)
-      ..strokeWidth = 4
-      ..strokeCap = StrokeCap.round;
-    final depthPaint = Paint()
-      ..color = const Color(0xffffcf5a).withAlpha(107)
-      ..strokeWidth = 2
-      ..strokeCap = StrokeCap.round;
-    final jointPaint = Paint()..color = const Color(0xffffffff);
-
     for (final person in people) {
       final points = person.landmarks
           .map((landmark) => _project(landmark, size, depth: false))
           .toList(growable: false);
-      final depthPoints = person.landmarks
-          .map((landmark) => _project(landmark, size, depth: true))
-          .toList(growable: false);
+      _drawAvatar(canvas, person, points, size);
+    }
+  }
 
-      if (showDepth) {
-        for (final (a, b) in connections) {
-          if (_isVisible(person, a) && _isVisible(person, b)) {
-            canvas.drawLine(depthPoints[a], depthPoints[b], depthPaint);
-          }
-        }
-      }
+  void _drawAvatar(
+    Canvas canvas,
+    PosePerson person,
+    List<Offset> points,
+    Size size,
+  ) {
+    final leftShoulder = _point(person, points, 11);
+    final rightShoulder = _point(person, points, 12);
+    final leftHip = _point(person, points, 23);
+    final rightHip = _point(person, points, 24);
 
-      for (final (a, b) in connections) {
-        if (_isVisible(person, a) && _isVisible(person, b)) {
-          canvas.drawLine(points[a], points[b], linePaint);
-        }
-      }
+    if (leftShoulder == null ||
+        rightShoulder == null ||
+        leftHip == null ||
+        rightHip == null) {
+      return;
+    }
 
-      for (var index = 0; index < person.landmarks.length; index += 1) {
-        if (_isVisible(person, index)) {
-          final radius = (6 - person.landmarks[index].z * 2).clamp(3, 7);
-          canvas.drawCircle(points[index], radius.toDouble(), jointPaint);
-        }
+    final shoulderWidth = (leftShoulder - rightShoulder).distance;
+    final hipWidth = (leftHip - rightHip).distance;
+    final bodyScale = (shoulderWidth + hipWidth)
+        .clamp(24.0, size.width * 0.5)
+        .toDouble();
+    final limbWidth = (bodyScale * 0.18).clamp(10.0, 34.0).toDouble();
+    final armWidth = (bodyScale * 0.14).clamp(8.0, 28.0).toDouble();
+    final handRadius = (bodyScale * 0.13).clamp(6.0, 22.0).toDouble();
+    final footRadius = (bodyScale * 0.16).clamp(8.0, 26.0).toDouble();
+
+    final skinPaint = Paint()
+      ..color = const Color(0xffe4ae82).withAlpha(232)
+      ..style = PaintingStyle.fill;
+    final skinShadePaint = Paint()
+      ..color = const Color(0xffb86f4a).withAlpha(118)
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round;
+    final shirtPaint = Paint()
+      ..shader = LinearGradient(
+        colors: [
+          const Color(0xff0f8f8d).withAlpha(236),
+          const Color(0xff0a4f69).withAlpha(236),
+        ],
+        begin: Alignment.topCenter,
+        end: Alignment.bottomCenter,
+      ).createShader(Rect.fromPoints(leftShoulder, rightHip))
+      ..style = PaintingStyle.fill;
+    final shortsPaint = Paint()
+      ..color = const Color(0xff242936).withAlpha(236)
+      ..style = PaintingStyle.fill;
+    final outlinePaint = Paint()
+      ..color = Colors.black.withAlpha(70)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = (bodyScale * 0.035).clamp(2.0, 6.0).toDouble()
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+    final shadowPaint = Paint()
+      ..color = Colors.black.withAlpha(showDepth ? 78 : 44)
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 10);
+
+    if (showDepth) {
+      final bounds = _personBounds(person, points);
+      if (bounds != null) {
+        canvas.drawOval(
+          Rect.fromCenter(
+            center: bounds.center.translate(0, bounds.height * 0.08),
+            width: bounds.width * 1.05,
+            height: bounds.height * 0.88,
+          ),
+          shadowPaint,
+        );
       }
     }
+
+    final leftElbow = _point(person, points, 13);
+    final rightElbow = _point(person, points, 14);
+    final leftWrist = _point(person, points, 15);
+    final rightWrist = _point(person, points, 16);
+    final leftKnee = _point(person, points, 25);
+    final rightKnee = _point(person, points, 26);
+    final leftAnkle = _point(person, points, 27);
+    final rightAnkle = _point(person, points, 28);
+    final leftFoot = _point(person, points, 31) ?? _point(person, points, 29);
+    final rightFoot = _point(person, points, 32) ?? _point(person, points, 30);
+
+    _drawLimb(
+      canvas,
+      [
+        leftShoulder,
+        if (leftElbow != null) leftElbow,
+        if (leftWrist != null) leftWrist,
+      ],
+      armWidth,
+      skinPaint,
+      outlinePaint,
+    );
+    _drawLimb(
+      canvas,
+      [
+        rightShoulder,
+        if (rightElbow != null) rightElbow,
+        if (rightWrist != null) rightWrist,
+      ],
+      armWidth,
+      skinPaint,
+      outlinePaint,
+    );
+
+    final leftLegStart = Offset.lerp(leftHip, rightHip, 0.12)!;
+    final rightLegStart = Offset.lerp(rightHip, leftHip, 0.12)!;
+    _drawLimb(
+      canvas,
+      [
+        leftLegStart,
+        if (leftKnee != null) leftKnee,
+        if (leftAnkle != null) leftAnkle,
+      ],
+      limbWidth,
+      skinPaint,
+      outlinePaint,
+    );
+    _drawLimb(
+      canvas,
+      [
+        rightLegStart,
+        if (rightKnee != null) rightKnee,
+        if (rightAnkle != null) rightAnkle,
+      ],
+      limbWidth,
+      skinPaint,
+      outlinePaint,
+    );
+
+    final waistLeft = Offset.lerp(leftHip, leftShoulder, 0.08)!;
+    final waistRight = Offset.lerp(rightHip, rightShoulder, 0.08)!;
+    final torsoPath = Path()
+      ..moveTo(leftShoulder.dx, leftShoulder.dy)
+      ..quadraticBezierTo(
+        (leftShoulder.dx + rightShoulder.dx) / 2,
+        (leftShoulder.dy + rightShoulder.dy) / 2 - bodyScale * 0.08,
+        rightShoulder.dx,
+        rightShoulder.dy,
+      )
+      ..lineTo(waistRight.dx, waistRight.dy)
+      ..quadraticBezierTo(
+        (leftHip.dx + rightHip.dx) / 2,
+        (leftHip.dy + rightHip.dy) / 2 + bodyScale * 0.08,
+        waistLeft.dx,
+        waistLeft.dy,
+      )
+      ..close();
+    canvas.drawPath(torsoPath, shirtPaint);
+    canvas.drawPath(torsoPath, outlinePaint);
+
+    final shortsPath = Path()
+      ..moveTo(waistLeft.dx, waistLeft.dy)
+      ..lineTo(waistRight.dx, waistRight.dy)
+      ..lineTo(
+        rightLegStart.dx + limbWidth * 0.45,
+        rightLegStart.dy + limbWidth,
+      )
+      ..lineTo((leftHip.dx + rightHip.dx) / 2, (leftHip.dy + rightHip.dy) / 2)
+      ..lineTo(leftLegStart.dx - limbWidth * 0.45, leftLegStart.dy + limbWidth)
+      ..close();
+    canvas.drawPath(shortsPath, shortsPaint);
+    canvas.drawPath(shortsPath, outlinePaint);
+
+    if (leftWrist != null) {
+      canvas.drawCircle(leftWrist, handRadius, skinPaint);
+      canvas.drawCircle(leftWrist, handRadius, outlinePaint);
+    }
+    if (rightWrist != null) {
+      canvas.drawCircle(rightWrist, handRadius, skinPaint);
+      canvas.drawCircle(rightWrist, handRadius, outlinePaint);
+    }
+    if (leftAnkle != null) {
+      _drawFoot(
+        canvas,
+        leftAnkle,
+        leftFoot,
+        footRadius,
+        shortsPaint,
+        outlinePaint,
+      );
+    }
+    if (rightAnkle != null) {
+      _drawFoot(
+        canvas,
+        rightAnkle,
+        rightFoot,
+        footRadius,
+        shortsPaint,
+        outlinePaint,
+      );
+    }
+
+    final neckTop = _headAnchor(person, points, leftShoulder, rightShoulder);
+    final neckBase = Offset.lerp(leftShoulder, rightShoulder, 0.5)!;
+    _drawLimb(
+      canvas,
+      [neckBase, neckTop],
+      (bodyScale * 0.16).clamp(8.0, 24.0).toDouble(),
+      skinPaint,
+      outlinePaint,
+    );
+    _drawHead(
+      canvas,
+      person,
+      points,
+      neckTop,
+      bodyScale,
+      skinPaint,
+      outlinePaint,
+    );
+
+    skinShadePaint.strokeWidth = (bodyScale * 0.025).clamp(1.5, 4.0).toDouble();
+    _drawSubtleContour(canvas, leftShoulder, leftHip, skinShadePaint);
+    _drawSubtleContour(canvas, rightShoulder, rightHip, skinShadePaint);
+  }
+
+  void _drawLimb(
+    Canvas canvas,
+    List<Offset> anchors,
+    double width,
+    Paint fillPaint,
+    Paint outlinePaint,
+  ) {
+    if (anchors.length < 2) {
+      return;
+    }
+
+    final outline = Paint()
+      ..color = outlinePaint.color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = width + outlinePaint.strokeWidth * 2
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+    final fill = Paint()
+      ..color = fillPaint.color
+      ..shader = fillPaint.shader
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = width
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round;
+
+    final path = Path()..moveTo(anchors.first.dx, anchors.first.dy);
+    if (anchors.length == 2) {
+      path.lineTo(anchors.last.dx, anchors.last.dy);
+    } else {
+      path.quadraticBezierTo(
+        anchors[1].dx,
+        anchors[1].dy,
+        anchors.last.dx,
+        anchors.last.dy,
+      );
+    }
+
+    canvas.drawPath(path, outline);
+    canvas.drawPath(path, fill);
+  }
+
+  void _drawFoot(
+    Canvas canvas,
+    Offset ankle,
+    Offset? toe,
+    double radius,
+    Paint fillPaint,
+    Paint outlinePaint,
+  ) {
+    final target = toe ?? ankle.translate(0, radius * 0.65);
+    final center = Offset.lerp(ankle, target, 0.6)!;
+    final angle = (target - ankle).direction;
+    canvas.save();
+    canvas.translate(center.dx, center.dy);
+    canvas.rotate(angle);
+    final rect = Rect.fromCenter(
+      center: Offset.zero,
+      width: radius * 2.25,
+      height: radius * 1.05,
+    );
+    canvas.drawOval(rect, fillPaint);
+    canvas.drawOval(rect, outlinePaint);
+    canvas.restore();
+  }
+
+  void _drawHead(
+    Canvas canvas,
+    PosePerson person,
+    List<Offset> points,
+    Offset neckTop,
+    double bodyScale,
+    Paint skinPaint,
+    Paint outlinePaint,
+  ) {
+    final nose = _point(person, points, 0);
+    final leftEar = _point(person, points, 7);
+    final rightEar = _point(person, points, 8);
+    final headCenter = nose == null
+        ? neckTop.translate(0, -bodyScale * 0.35)
+        : nose;
+    final headWidth = leftEar != null && rightEar != null
+        ? (leftEar - rightEar).distance
+              .clamp(bodyScale * 0.28, bodyScale * 0.62)
+              .toDouble()
+        : bodyScale * 0.42;
+    final headHeight = headWidth * 1.28;
+    final headRect = Rect.fromCenter(
+      center: Offset(headCenter.dx, headCenter.dy - headHeight * 0.06),
+      width: headWidth,
+      height: headHeight,
+    );
+    final hairRect = Rect.fromLTWH(
+      headRect.left,
+      headRect.top - headHeight * 0.03,
+      headRect.width,
+      headRect.height * 0.48,
+    );
+    final hairPaint = Paint()
+      ..color = const Color(0xff2c1c16).withAlpha(224)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = headHeight * 0.18
+      ..strokeCap = StrokeCap.round;
+    final faceDetailPaint = Paint()
+      ..color = Colors.black.withAlpha(95)
+      ..strokeWidth = (bodyScale * 0.018).clamp(1.0, 3.0).toDouble()
+      ..strokeCap = StrokeCap.round;
+
+    canvas.drawOval(headRect, skinPaint);
+    canvas.drawOval(headRect, outlinePaint);
+    canvas.drawArc(hairRect, 3.14, 3.14, false, hairPaint);
+
+    final leftEye = _point(person, points, 2);
+    final rightEye = _point(person, points, 5);
+    if (leftEye != null && rightEye != null) {
+      final eyeRadius = (bodyScale * 0.022).clamp(1.5, 4.0).toDouble();
+      canvas.drawCircle(leftEye, eyeRadius, faceDetailPaint);
+      canvas.drawCircle(rightEye, eyeRadius, faceDetailPaint);
+    }
+    canvas.drawLine(
+      headRect.center.translate(-headWidth * 0.16, headHeight * 0.18),
+      headRect.center.translate(headWidth * 0.16, headHeight * 0.18),
+      faceDetailPaint,
+    );
+  }
+
+  void _drawSubtleContour(Canvas canvas, Offset from, Offset to, Paint paint) {
+    canvas.drawLine(
+      Offset.lerp(from, to, 0.22)!,
+      Offset.lerp(from, to, 0.78)!,
+      paint,
+    );
+  }
+
+  Offset _headAnchor(
+    PosePerson person,
+    List<Offset> points,
+    Offset leftShoulder,
+    Offset rightShoulder,
+  ) {
+    final nose = _point(person, points, 0);
+    final shoulderCenter = Offset.lerp(leftShoulder, rightShoulder, 0.5)!;
+    if (nose == null) {
+      return shoulderCenter.translate(
+        0,
+        -(leftShoulder - rightShoulder).distance * 0.35,
+      );
+    }
+    return Offset.lerp(shoulderCenter, nose, 0.42)!;
   }
 
   Offset _project(PoseLandmark landmark, Size size, {required bool depth}) {
@@ -577,13 +945,44 @@ class PosePainter extends CustomPainter {
       return Offset(x, y);
     }
 
-    final depthOffset = landmark.z.clamp(-0.5, 0.5) * size.shortestSide * 0.18;
+    final depthOffset =
+        landmark.z.clamp(-0.5, 0.5).toDouble() * size.shortestSide * 0.18;
     return Offset(x - depthOffset, y + depthOffset);
   }
 
-  bool _isVisible(PosePerson person, int index) {
-    return person.landmarks.length > index &&
-        person.landmarks[index].visibility > 0.45;
+  Offset? _point(PosePerson person, List<Offset> points, int index) {
+    if (person.landmarks.length <= index ||
+        points.length <= index ||
+        person.landmarks[index].visibility <= 0.35) {
+      return null;
+    }
+    return points[index];
+  }
+
+  Rect? _personBounds(PosePerson person, List<Offset> points) {
+    final visiblePoints = <Offset>[
+      for (
+        var index = 0;
+        index < person.landmarks.length && index < points.length;
+        index += 1
+      )
+        if (person.landmarks[index].visibility > 0.35) points[index],
+    ];
+    if (visiblePoints.isEmpty) {
+      return null;
+    }
+
+    var left = visiblePoints.first.dx;
+    var top = visiblePoints.first.dy;
+    var right = visiblePoints.first.dx;
+    var bottom = visiblePoints.first.dy;
+    for (final point in visiblePoints.skip(1)) {
+      left = point.dx < left ? point.dx : left;
+      top = point.dy < top ? point.dy : top;
+      right = point.dx > right ? point.dx : right;
+      bottom = point.dy > bottom ? point.dy : bottom;
+    }
+    return Rect.fromLTRB(left, top, right, bottom);
   }
 
   @override

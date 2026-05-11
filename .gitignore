@@ -1,51 +1,107 @@
-# Miscellaneous
-*.class
-*.log
-*.pyc
-*.swp
+# Operating system files
 .DS_Store
-.venv/
-venv/
-__pycache__/
-.atom/
-.build/
-.buildlog/
-.history
-.svn/
-.swiftpm/
-migrate_working_dir/
+Thumbs.db
+Desktop.ini
 
-# IntelliJ related
+# Editor and IDE files
+.idea/
 *.iml
 *.ipr
 *.iws
-.idea/
+.vscode/
 
-# The .vscode folder contains launch configuration and tasks you configure in
-# VS Code which you may wish to be included in version control, so this line
-# is commented out by default.
-#.vscode/
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.swp
+*.swo
+.history/
 
-# Flutter/Dart/Pub related
-**/doc/api/
-**/ios/Flutter/.last_build_id
+# Flutter, Dart, and Pub generated files
 .dart_tool/
+.flutter-plugins
 .flutter-plugins-dependencies
+.packages
 .pub-cache/
 .pub/
-/build/
-/coverage/
+build/
+coverage/
+**/doc/api/
+**/ios/Flutter/.last_build_id
 
-# Symbolication related
+# Flutter build symbol and obfuscation outputs
 app.*.symbols
-
-# Obfuscation related
 app.*.map.json
 
-# Android Studio will place build artifacts here
-/android/app/debug
-/android/app/profile
-/android/app/release
+# Android generated build outputs
+android/.gradle/
+android/app/debug/
+android/app/profile/
+android/app/release/
+android/app/build/
+android/build/
+*.apk
+*.aab
 
-# Backend / Python
+# iOS and macOS generated build outputs
+ios/Pods/
+ios/.symlinks/
+ios/Flutter/Flutter.framework
+ios/Flutter/Flutter.podspec
+ios/build/
+macos/Pods/
+macos/.symlinks/
+macos/Flutter/Flutter-Debug.xcconfig
+macos/Flutter/Flutter-Release.xcconfig
+macos/build/
+
+# Linux, Windows, and desktop build outputs
+linux/build/
+windows/build/
+
+# Python virtual environments and caches
+.venv/
+venv/
+env/
+ENV/
 backend/.venv/
+backend/venv/
+backend/env/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Python packaging/build artifacts
+dist/
+*.egg-info/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Local database, media, and model artifacts
+*.sqlite
+*.sqlite3
+*.db
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.onnx
+*.tflite
+*.pt
+*.pth
+*.ckpt
+
+# Generated screenshots and captures
+screenshots/
+captures/
+recordings/
