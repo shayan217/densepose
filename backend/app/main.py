@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -12,6 +13,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 
+logger = logging.getLogger("dense_pose.backend")
 app = FastAPI(title="Dense Pose Lab Backend", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
@@ -97,6 +99,7 @@ def models() -> dict[str, Any]:
 @app.websocket("/ws/pose")
 async def pose_socket(websocket: WebSocket) -> None:
     await websocket.accept()
+    logger.info("WebSocket connected: %s", websocket.client)
     frame_count = 0
     fps_started_at = time.perf_counter()
     smoothed_fps = 0.0
@@ -105,12 +108,14 @@ async def pose_socket(websocket: WebSocket) -> None:
         while True:
             payload = await websocket.receive_json()
             if payload.get("type") != "frame":
+                logger.warning("Unexpected WebSocket payload from %s", websocket.client)
                 await websocket.send_json({"type": "error", "message": "Expected frame payload"})
                 continue
 
             try:
                 frame = decode_frame(payload.get("image", ""))
             except ValueError as error:
+                logger.warning("Frame decode failed from %s: %s", websocket.client, error)
                 await websocket.send_json({"type": "error", "message": str(error)})
                 continue
             people = estimator.estimate(frame)
@@ -124,6 +129,14 @@ async def pose_socket(websocket: WebSocket) -> None:
                 )
                 frame_count = 0
                 fps_started_at = time.perf_counter()
+                logger.info(
+                    "Processed frames from %s: fps=%.2f people=%d frame=%dx%d",
+                    websocket.client,
+                    smoothed_fps,
+                    len(people),
+                    frame.shape[1],
+                    frame.shape[0],
+                )
 
             await websocket.send_json(
                 {
@@ -135,6 +148,7 @@ async def pose_socket(websocket: WebSocket) -> None:
                 }
             )
     except WebSocketDisconnect:
+        logger.info("WebSocket disconnected: %s", websocket.client)
         return
 
 
