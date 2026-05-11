@@ -953,7 +953,7 @@ class PosePainter extends CustomPainter {
   Offset? _point(PosePerson person, List<Offset> points, int index) {
     if (person.landmarks.length <= index ||
         points.length <= index ||
-        person.landmarks[index].visibility <= 0.35) {
+        person.landmarks[index].visibility <= 0.1) {
       return null;
     }
     return points[index];
@@ -966,7 +966,7 @@ class PosePainter extends CustomPainter {
         index < person.landmarks.length && index < points.length;
         index += 1
       )
-        if (person.landmarks[index].visibility > 0.35) points[index],
+        if (person.landmarks[index].visibility > 0.1) points[index],
     ];
     if (visiblePoints.isEmpty) {
       return null;
